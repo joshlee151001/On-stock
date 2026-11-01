@@ -285,7 +285,7 @@ try {
 "use strict";
 /* =====================================================================
    On-stock 모의 투자
-   - 가짜 회사 10개, 진짜 한국 주식시장 시간표 (평일 09:00~15:30, 동시호가, 휴장일, 상·하한가 ±30%, 호가 단위)
+   - 가짜 회사 10개, 매일 열리는 시장 (평일 07:30~22:30, 주말·공휴일 09:30~23:30, 동시호가, 상·하한가 ±30%, 호가 단위). 2026-11-01 전 날짜는 진짜 한국거래소 시간표
    - 주가는 "날짜 + 시간"으로 정해지는 계산식이라 앱을 꺼 놔도 시장은 계속 움직임 (서버 필요 없음)
    - 계좌는 온챗 Firebase에 저장 → 어느 기기에서든 같은 계좌, 아빠는 구경하기
    ===================================================================== */
@@ -349,23 +349,38 @@ const HOLIDAY_NAME = {
   "2027-12-27": "성탄절 대체공휴일", "2027-12-31": "연말 휴장",
 };
 const EPOCH = "2026-09-01"; // 이 날부터 시장이 시작돼 (차트 기록도 여기서부터)
-const CLOSE_MIN = 15 * 60 + 30;   // 15:30 장 마감
-const CLOSING_AUCTION = 15 * 60 + 20; // 15:20부터 마감 동시호가
+// 2026-11-01부터 On-stock만의 시간표: 매일 열려요!
+//   평일 07:30 ~ 22:30 · 주말·공휴일 09:30 ~ 23:30
+//   (그 전 날짜는 진짜 한국거래소 시간표 그대로 → 지난 차트·가격이 안 바뀜)
+const NEW_RULES = "2026-11-01";
+const isRestDay = (date) => { const w = dowOf(date); return w === 0 || w === 6 || HOLIDAYS.has(date); };
+function closeMin(date) {
+  if (date < NEW_RULES) return 15 * 60 + 30;
+  return isRestDay(date) ? 23 * 60 + 30 : 22 * 60 + 30;
+}
+const auctionMin = (date) => closeMin(date) - 10; // 마감 10분 전부터 마감 동시호가
 
 function isTradingDay(date) {
+  if (date >= NEW_RULES) return true;
   const w = dowOf(date);
   return w >= 1 && w <= 5 && !HOLIDAYS.has(date);
 }
-// 그해 첫 거래일은 1시간 늦게 10:00에 열림 (진짜 한국거래소처럼)
 function openMin(date) {
+  if (date >= NEW_RULES) return isRestDay(date) ? 9 * 60 + 30 : 7 * 60 + 30;
+  // 예전 규칙: 그해 첫 거래일은 1시간 늦게 10:00
   const first = firstTradingDayOfYear(Number(date.slice(0, 4)));
   return date === first ? 10 * 60 : 9 * 60;
+}
+function dayKind(date) {
+  if (date < NEW_RULES || !isRestDay(date)) return "평일장";
+  return HOLIDAY_NAME[date] ? `공휴일장 · ${HOLIDAY_NAME[date]}` : "주말장";
 }
 const firstCache = {};
 function firstTradingDayOfYear(y) {
   if (firstCache[y]) return firstCache[y];
   let d = `${y}-01-01`;
-  while (!isTradingDay(d)) d = addDays(d, 1);
+  const w = (x) => { const k = dowOf(x); return k >= 1 && k <= 5 && !HOLIDAYS.has(x); };
+  while (!w(d)) d = addDays(d, 1);
   return (firstCache[y] = d);
 }
 function nextTradingDay(date) {
@@ -384,10 +399,11 @@ function marketState(t = kst()) {
     return { phase: "holiday", date: t.date, label: HOLIDAY_NAME[t.date] ? `휴장 · ${HOLIDAY_NAME[t.date]}` : "휴장 · 주말" };
   }
   const o = openMin(t.date);
+  const kind = t.date >= NEW_RULES && isRestDay(t.date) ? (HOLIDAY_NAME[t.date] ? "공휴일장" : "주말장") : "";
   if (t.min < o - 30) return { phase: "before", date: t.date, label: "장 시작 전" };
   if (t.min < o) return { phase: "pre", date: t.date, label: `동시호가 · ${hm(o)} 개장` };
-  if (t.min < CLOSING_AUCTION) return { phase: "open", date: t.date, label: "장 중" };
-  if (t.min < CLOSE_MIN) return { phase: "closing", date: t.date, label: "마감 동시호가" };
+  if (t.min < auctionMin(t.date)) return { phase: "open", date: t.date, label: kind ? `장 중 · ${kind}` : "장 중" };
+  if (t.min < closeMin(t.date)) return { phase: "closing", date: t.date, label: "마감 동시호가" };
   return { phase: "after", date: t.date, label: "장 마감" };
 }
 // 가장 최근에 열렸던(또는 열려 있는) 거래일
@@ -504,9 +520,9 @@ const NEWS = {
 };
 
 /* ---------------- 시장 엔진: 하루치 주가 만들기 ---------------- */
-// 하루 = 개장~15:30 까지 1분마다 가격 (index 0 = 시가)
+// 하루 = 개장~마감 까지 1분마다 가격 (index 0 = 시가)
 const dayCache = new Map();
-function dayLength(date) { return CLOSE_MIN - openMin(date); }
+function dayLength(date) { return closeMin(date) - openMin(date); }
 
 function newsOfDay(date) {
   const r = rng("NEWS:" + date);
@@ -514,8 +530,9 @@ function newsOfDay(date) {
   const count = 2 + Math.floor(r() * 4);
   const list = [];
   for (let i = 0; i < count; i++) {
-    // 07:00 ~ 15:10 사이 (장 시작 전 뉴스는 시가에 반영)
-    const minute = Math.floor(7 * 60 + r() * (15 * 60 + 10 - 7 * 60));
+    // 장 시작 2시간 전 ~ 마감 20분 전 (장 시작 전 뉴스는 시가에 반영). 예전 날짜는 07:00~15:10
+    const from = date < NEW_RULES ? 7 * 60 : o - 120, until = date < NEW_RULES ? 15 * 60 + 10 : closeMin(date) - 20;
+    const minute = Math.floor(from + r() * (until - from));
     const roll = r();
     const positive = r() < 0.52;
     const sizeRoll = r();
@@ -601,7 +618,7 @@ function buildDay(date) {
       prices[i] = p;
     }
     const tp = Array.from(prices, roundTick).map((v) => Math.min(up, Math.max(lo, v)));
-    const contEnd = CLOSING_AUCTION - o; // 15:20 의 index
+    const contEnd = auctionMin(date) - o; // 마감 동시호가 시작 index
     const open = tp[0], close = tp[N];
     let high = open, low = open;
     for (let i = 0; i <= contEnd; i++) { if (tp[i] > high) high = tp[i]; if (tp[i] < low) low = tp[i]; }
@@ -773,7 +790,7 @@ function processOrders(t = kst(), silent = false) {
       if (ok(c.open)) fill = { price: c.open, at: msAt(o.day, day.open) };
       else o.session = "cont";
     }
-    // ② 장 중: 주문 뒤 1분마다 가격 확인 (15:20 전까지)
+    // ② 장 중: 주문 뒤 1분마다 가격 확인 (마감 동시호가 전까지)
     if (!fill && o.session === "cont" && o.type === "limit") {
       const from = Math.max(1, Math.ceil(orderMin - day.open + 0.0001));
       const to = Math.min(c.contEnd, Math.floor(nowMin - day.open));
@@ -785,9 +802,9 @@ function processOrders(t = kst(), silent = false) {
         }
       }
     }
-    // ③ 15:30 마감 동시호가 → 종가에 체결, 안 되면 주문 만료
-    if (!fill && nowMin >= CLOSE_MIN) {
-      if (ok(c.close)) fill = { price: c.close, at: msAt(o.day, CLOSE_MIN) };
+    // ③ 마감 동시호가 → 종가에 체결, 안 되면 주문 만료
+    if (!fill && nowMin >= closeMin(o.day)) {
+      if (ok(c.close)) fill = { price: c.close, at: msAt(o.day, closeMin(o.day)) };
       else {
         o.status = "expired";
         delete o.reserve;
@@ -837,13 +854,13 @@ function dividendDates(t = kst()) {
 function payDividends(t = kst()) {
   let paid = 0;
   for (const { record, pay } of dividendDates(t)) {
-    if (msAt(pay, 8 * 60) > t.ms) continue;
-    if (msAt(record, CLOSE_MIN) < acct.createdAt) continue;
+    if (msAt(pay, openMin(pay)) > t.ms) continue;
+    if (msAt(record, closeMin(record)) < acct.createdAt) continue;
     for (const c of COMPANIES) {
       if (!c.dps) continue;
       const key = `${c.code}@${record}`;
       if (acct.divs[key] != null) continue;
-      const q = qtyAt(c.code, msAt(record, CLOSE_MIN));
+      const q = qtyAt(c.code, msAt(record, closeMin(record)));
       const amt = q > 0 ? q * c.dps : 0;
       acct.divs[key] = amt;
       if (amt > 0) {
@@ -861,7 +878,7 @@ function placeOrder({ code, side, type, price, qty }) {
   const t = kst();
   const st = marketState(t);
   if (!["pre", "open", "closing"].includes(st.phase)) {
-    return { err: st.phase === "holiday" ? "오늘은 휴장일이라 주문할 수 없어요" : "지금은 주문 시간이 아니에요 (평일 08:30~15:30)" };
+    return { err: st.phase === "holiday" ? "오늘은 휴장일이라 주문할 수 없어요" : "지금은 주문 시간이 아니에요 (평일 07:00~22:30 · 주말·공휴일 09:00~23:30)" };
   }
   qty = Math.floor(qty);
   if (!(qty > 0)) return { err: "수량을 1주 이상 넣어 주세요" };
@@ -917,10 +934,10 @@ function portfolio(t = kst()) {
 }
 // 날짜별 총 자산 (거래 기록으로 다시 계산)
 function assetHistory(t = kst()) {
-  const dates = sessionDates(t).filter((d) => msAt(d, CLOSE_MIN) >= acct.createdAt - 86400e3);
+  const dates = sessionDates(t).filter((d) => msAt(d, closeMin(d)) >= acct.createdAt - 86400e3);
   const out = [];
   for (const d of dates) {
-    const cut = d === t.date ? t.ms : msAt(d, CLOSE_MIN);
+    const cut = d === t.date ? t.ms : msAt(d, closeMin(d));
     let cash = START_CASH;
     const qty = {};
     for (const tr of acct.trades) {
@@ -931,7 +948,7 @@ function assetHistory(t = kst()) {
     }
     for (const [k, v] of Object.entries(acct.divs)) {
       const rec = k.split("@")[1];
-      if (v && msAt(nextTradingDay(rec), 8 * 60) <= cut) cash += v;
+      if (v && msAt(nextTradingDay(rec), openMin(nextTradingDay(rec))) <= cut) cash += v;
     }
     let val = 0;
     for (const [code, q] of Object.entries(qty)) if (q > 0) val += q * (d === t.date ? quote(code, t).price : buildDay(d).companies[code].close);
@@ -1056,11 +1073,11 @@ function drawChart(cv, tip, mode, code) {
     }
     g.fillStyle = sub;
     g.fillText(hm(day.open), padL, h - 6);
-    g.textAlign = "right"; g.fillText("15:30", padL + W, h - 6); g.textAlign = "left";
+    g.textAlign = "right"; g.fillText(hm(day.open + day.N), padL + W, h - 6); g.textAlign = "left";
     labels = { x, y, count: points.length, slots: totalSlots };
   } else {
-    const n = mode === "1m" ? 22 : mode === "3m" ? 66 : 250;
-    const dates = sessionDates(t).slice(-n);
+    const back = addDays(t.date, mode === "1m" ? -31 : mode === "3m" ? -92 : -366);
+    const dates = sessionDates(t).filter((d) => d > back);
     const candles = dates.map((d) => {
       const c = buildDay(d).companies[code];
       if (d === t.date) {
@@ -1361,7 +1378,7 @@ const TERMS = [
   ["시장가 주문", "가격은 상관없이 지금 가격에 바로 사거나 파는 주문이에요. 빨리 체결되지만 생각보다 비싸게 살 수도 있어요."],
   ["지정가 주문", "'이 가격이 되면 사 줘/팔아 줘' 하고 가격을 정해 두는 주문이에요. 그 가격이 안 오면 체결이 안 되고, 장이 끝나면 사라져요."],
   ["체결 · 미체결", "체결은 주문이 실제로 거래된 것, 미체결은 아직 기다리는 주문이에요."],
-  ["동시호가", "장 시작 전 08:30~09:00와 장 마감 전 15:20~15:30에는 주문을 모아 뒀다가 한 가격(시가/종가)으로 한꺼번에 체결해요."],
+  ["동시호가", "장 시작 전 30분과 장 마감 전 10분에는 주문을 모아 뒀다가 한 가격(시가/종가)으로 한꺼번에 체결해요. (평일 07:00~07:30 · 22:20~22:30)"],
   ["예수금", "계좌에 있는 현금이에요. 주식을 팔면 늘고, 사면 줄어요."],
   ["평단 (평균 단가)", "내가 산 주식의 평균 가격이에요. 여러 번 나눠 사면 평균이 바뀌어요. 현재가가 평단보다 높으면 이익이에요."],
   ["수익률", "넣은 돈 대비 얼마나 벌었는지(잃었는지) %로 나타낸 거예요."],
@@ -1371,7 +1388,7 @@ const TERMS = [
   ["분산 투자", "한 회사에 몰빵하지 않고 여러 회사에 나눠 투자하는 거예요. 한 회사가 떨어져도 덜 위험해요."],
   ["손절 · 익절", "손절은 손해를 보고라도 팔아서 더 큰 손해를 막는 것, 익절은 이익이 났을 때 팔아서 확정하는 거예요."],
   ["방어주 · 성장주 · 배당주", "방어주는 경기가 나빠도 잘 안 흔들리는 주식(식품 등), 성장주는 빠르게 크는 대신 변동이 큰 주식(IT, 바이오 등), 배당주는 배당을 많이 주는 주식(은행 등)이에요."],
-  ["휴장일", "주말, 공휴일(설·추석 등), 선거일, 12월 31일에는 주식시장이 쉬어요. 그해 첫 거래일은 10시에 열려요."],
+  ["휴장일", "진짜 주식시장은 주말·공휴일에 쉬지만, On-stock은 매일 열려요! 주말·공휴일은 09:30~23:30 '주말장'이에요."],
 ];
 function renderMore() {
   const box = $("tab-more");
@@ -1458,10 +1475,10 @@ function showRules() {
   openSheet((sh) => {
     sh.append(el("h3", null, "📋 On-stock 시장 규칙"));
     const lines = [
-      "🕘 평일 09:00 ~ 15:30에 열려요 (그해 첫 거래일은 10:00 개장)",
-      "⏳ 08:30~09:00 장 시작 전 동시호가: 주문을 모았다가 9시에 시가로 한꺼번에 체결",
-      "⏳ 15:20~15:30 마감 동시호가: 주문을 모았다가 15:30에 종가로 체결",
-      "🚫 주말, 공휴일(설·추석 등), 선거일, 12월 31일은 휴장",
+      "🕘 평일 07:30 ~ 22:30에 열려요",
+      "🌤️ 주말·공휴일도 09:30 ~ 23:30에 열려요 (주말장)",
+      "⏳ 장 시작 전 30분 동시호가: 주문을 모았다가 개장 때 시가로 한꺼번에 체결",
+      "⏳ 마감 전 10분 동시호가: 주문을 모았다가 마감 때 종가로 체결",
       "📏 상한가·하한가: 어제 종가의 ±30%",
       "🔢 호가 단위: 가격대마다 1·5·10·50·100·500·1,000원",
       "📝 주문은 그날만 유효해요. 장이 끝날 때까지 체결 안 되면 사라져요",
@@ -1594,8 +1611,8 @@ function renderDetail(full) {
   requestAnimationFrame(() => drawChart(cv, tip, chartMode, detailCode));
 }
 function noteFor(q, st) {
-  if (st.phase === "pre") return `동시호가 중이에요. 예상 시가 ${won(q.expected)} (${pct((q.expected - q.prevClose) / q.prevClose)}) · 9시에 한꺼번에 체결돼요`;
-  if (st.phase === "closing") return `마감 동시호가 중이에요. 예상 종가 ${won(q.expected)} · 15:30에 한꺼번에 체결돼요`;
+  if (st.phase === "pre") return `동시호가 중이에요. 예상 시가 ${won(q.expected)} (${pct((q.expected - q.prevClose) / q.prevClose)}) · ${hm(openMin(st.date))}에 한꺼번에 체결돼요`;
+  if (st.phase === "closing") return `마감 동시호가 중이에요. 예상 종가 ${won(q.expected)} · ${hm(closeMin(st.date))}에 한꺼번에 체결돼요`;
   if (st.phase === "before") return `장 시작 전이에요. 현재가는 어제 종가예요 · ${nextOpenText()}`;
   if (st.phase === "after" || st.phase === "holiday") return `장이 끝났어요. 현재가는 ${q.sessionDate.slice(5).replace("-", "/")} 종가예요 · 다음 장: ${nextOpenText()}`;
   if (q.atUpper) return "🔥 상한가! 오늘은 더 오를 수 없어요";
@@ -1643,7 +1660,7 @@ function openOrder(side) {
   const st = marketState();
   if (!["pre", "open", "closing"].includes(st.phase)) {
     openSheet((sh) => {
-      sh.append(el("h3", null, "지금은 주문할 수 없어요 🕘"), el("div", "hint", `${st.label} · 주문은 거래일 08:30~15:30에만 할 수 있어요.\n다음 장: ${nextOpenText()}`));
+      sh.append(el("h3", null, "지금은 주문할 수 없어요 🕘"), el("div", "hint", `${st.label} · 주문은 평일 07:00~22:30, 주말·공휴일 09:00~23:30에 할 수 있어요.\n다음 장: ${nextOpenText()}`));
       sh.lastChild.style.whiteSpace = "pre-line";
       const ok = el("button", "btn block", "확인");
       ok.onclick = closeSheet;
@@ -1710,7 +1727,7 @@ function openOrder(side) {
       bLimit.classList.toggle("on", type === "limit");
       const isMarket = type === "market";
       typeHint.textContent = isMarket
-        ? (st.phase === "open" ? "지금 가격에 바로 체결돼요." : st.phase === "pre" ? "9시 시가에 체결돼요. (돈은 상한가 기준으로 잠깐 묶여요)" : "15:30 종가에 체결돼요. (돈은 상한가 기준으로 잠깐 묶여요)")
+        ? (st.phase === "open" ? "지금 가격에 바로 체결돼요." : st.phase === "pre" ? `${hm(openMin(st.date))} 시가에 체결돼요. (돈은 상한가 기준으로 잠깐 묶여요)` : `${hm(closeMin(st.date))} 종가에 체결돼요. (돈은 상한가 기준으로 잠깐 묶여요)`)
         : `원하는 가격을 정해요. ${side === "buy" ? "그 가격 이하로 내려오면" : "그 가격 이상으로 오르면"} 체결되고, 오늘 장이 끝나면 사라져요.`;
       priceLabel.replaceChildren(el("span", null, "가격"), el("span", null, `현재가 ${fmt(q.price)} · 호가 단위 ${fmt(tickSize(price || q.price))}원`));
       pInput.disabled = isMarket;
@@ -1760,7 +1777,7 @@ function openOrder(side) {
       if (r.filled) {
         toast(`✅ ${c.name} ${fmt(qty)}주 ${side === "buy" ? "매수" : "매도"} 체결 (${won(r.price)})${side === "sell" ? ` · 손익 ${signWon(r.realized)}` : ""}`, "ok");
       } else {
-        toast(r.session === "pre" ? "📝 주문 접수! 9시 시가에 체결돼요" : r.session === "close" ? "📝 주문 접수! 15:30 종가에 체결돼요" : "📝 주문 접수! 가격이 오면 체결돼요");
+        toast(r.session === "pre" ? `📝 주문 접수! ${hm(openMin(kst().date))} 시가에 체결돼요` : r.session === "close" ? `📝 주문 접수! ${hm(closeMin(kst().date))} 종가에 체결돼요` : "📝 주문 접수! 가격이 오면 체결돼요");
       }
       renderAll();
     };
