@@ -133,7 +133,17 @@ input, textarea { font-family: inherit; font-size: 16px; color: var(--text); }
 .d-chg { font-size: 15px; font-weight: 800; margin-top: 2px; }
 .d-note { font-size: 12px; color: var(--sub); margin-top: 6px; line-height: 1.5; }
 .chart-wrap { position: relative; margin: 6px 0 0; }
-.chart { width: 100%; height: 230px; display: block; touch-action: pan-y; }
+.chart { width: 100%; height: 230px; display: block; touch-action: pan-y; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.chart-tools { display: flex; align-items: center; gap: 6px; margin: 8px 14px 0; }
+.chart-hint { flex: 1; font-size: 11px; color: var(--sub); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chart-tools button { width: 34px; height: 30px; border-radius: 9px; background: var(--input); font-size: 15px; font-weight: 800; color: var(--text); flex-shrink: 0; }
+.big-chart { position: fixed; inset: 0; z-index: 60; background: var(--card); display: flex; flex-direction: column; gap: 8px; padding: calc(10px + env(safe-area-inset-top)) calc(8px + env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom)) calc(8px + env(safe-area-inset-left)); }
+.big-chart .seg { margin: 0 6px; }
+.big-chart .chart-tools { margin: 0 6px; }
+.bc-head { display: flex; align-items: center; gap: 8px; padding: 0 6px; }
+.bc-title { flex: 1; font-size: 16px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bc-title span { font-size: 14px; font-weight: 800; }
+.bc-close { width: 38px; height: 38px; border-radius: 12px; background: var(--input); font-size: 17px; font-weight: 800; }
 .chart-tip { position: absolute; top: 4px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--card); font-size: 12px; font-weight: 700; padding: 4px 9px; border-radius: 8px; pointer-events: none; white-space: nowrap; }
 .chart-range { margin: 8px 14px 0; }
 .kv { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; font-size: 14px; }
@@ -1019,22 +1029,15 @@ function drawSpark(cv, values, base) {
   }
 }
 
-// 하루 선 차트 (분 단위) 또는 캔들 (일 단위)
-function drawChart(cv, tip, mode, code) {
-  const H = 230;
-  const { g, w, h } = setupCanvas(cv, H);
-  const t = kst();
-  const padL = 6, padR = 58, padT = 14, padB = 22;
-  const W = w - padL - padR, HH = h - padT - padB;
-  g.clearRect(0, 0, w, h);
-  g.font = "11px -apple-system, sans-serif";
-  const up = css("--up"), down = css("--down"), sub = css("--sub"), line = css("--line");
-  let points = [], base = null, mn, mx, labels = [];
+// 차트: 1일(분 단위 선) 또는 1주~전체(일 단위 캔들)
+//  - 두 손가락 벌리기/모으기 = 확대/축소 · 확대한 뒤 옆으로 끌기 = 지난 기간 보기
+//  - 꾹 누르고 움직이기 (확대 안 했을 땐 그냥 끌기) = 그 시점 가격 보기
+//  - 두 번 톡톡 = 처음 크기로
+function chartData(mode, code, t) {
   if (mode === "1d") {
     const d = lastSessionDate(t);
     const day = buildDay(d);
     const c = day.companies[code];
-    base = c.prevClose;
     let to = day.N;
     if (d === t.date) {
       const st = marketState(t);
@@ -1042,86 +1045,276 @@ function drawChart(cv, tip, mode, code) {
       else if (st.phase === "open") to = Math.floor(t.min - day.open);
       else if (st.phase === "closing") to = c.contEnd;
     }
-    for (let i = 0; i <= to; i++) points.push({ v: c.tp[i], label: hm(day.open + i) });
-    if (d === t.date && marketState(t).phase === "open" && points.length) points.push({ v: quote(code, t).price, label: hm(t.min) });
-    const vals = points.map((p) => p.v).concat([base]);
-    mn = Math.min(...vals); mx = Math.max(...vals);
-    const totalSlots = day.N;
-    const x = (i) => padL + (i / totalSlots) * W;
-    const y = (v) => padT + (mx === mn ? HH / 2 : (1 - (v - mn) / (mx - mn)) * HH);
-    // 기준선 (어제 종가)
-    g.setLineDash([3, 4]); g.strokeStyle = sub; g.lineWidth = 1;
-    g.beginPath(); g.moveTo(padL, y(base)); g.lineTo(padL + W, y(base)); g.stroke(); g.setLineDash([]);
-    g.fillStyle = sub; g.fillText(fmt(base), padL + W + 6, y(base) + 4);
-    if (!points.length) {
-      g.fillStyle = sub; g.textAlign = "center";
-      g.fillText("오늘 장이 아직 열리지 않았어요", padL + W / 2, padT + HH / 2);
-      g.textAlign = "left";
-    } else {
-      const last = points[points.length - 1].v;
-      const col = last > base ? up : last < base ? down : sub;
-      const grad = g.createLinearGradient(0, padT, 0, padT + HH);
-      grad.addColorStop(0, col + "33"); grad.addColorStop(1, col + "00");
-      g.beginPath();
-      points.forEach((p, i) => { const xx = x(Math.min(i, totalSlots)); i ? g.lineTo(xx, y(p.v)) : g.moveTo(xx, y(p.v)); });
-      g.strokeStyle = col; g.lineWidth = 2; g.stroke();
-      g.lineTo(x(Math.min(points.length - 1, totalSlots)), padT + HH); g.lineTo(x(0), padT + HH); g.closePath();
-      g.fillStyle = grad; g.fill();
-      g.fillStyle = col; g.beginPath(); g.arc(x(Math.min(points.length - 1, totalSlots)), y(last), 3.5, 0, Math.PI * 2); g.fill();
-      g.fillText(fmt(mx), padL + W + 6, padT + 4);
-      g.fillText(fmt(mn), padL + W + 6, padT + HH);
+    const items = [];
+    for (let i = 0; i <= to; i++) items.push({ s: i, v: c.tp[i], label: hm(day.open + i) });
+    if (d === t.date && marketState(t).phase === "open" && items.length) items.push({ s: Math.min(day.N, t.min - day.open), v: quote(code, t).price, label: hm(t.min) });
+    return { line: true, items, S: day.N, base: c.prevClose, minSpan: Math.min(day.N, 20), start: hm(day.open), xLabel: (s) => hm(day.open + s), date: d };
+  }
+  const days = { "1w": 7, "1m": 31, "3m": 92, "1y": 366, all: 99999 }[mode];
+  const back = addDays(t.date, -days);
+  const allDates = sessionDates(t);
+  const dates = allDates.filter((d) => d > back);
+  const skip = allDates.length - dates.length;
+  const closeOf = (d) => (d === t.date ? quote(code, t).price : buildDay(d).companies[code].close);
+  const items = dates.map((d, i) => {
+    const c = buildDay(d).companies[code];
+    if (d === t.date) {
+      const q = quote(code, t);
+      return { s: i + 0.5, d, o: q.open ?? q.price, h: q.high ?? q.price, l: q.low ?? q.price, c: q.price, prev: c.prevClose };
     }
-    g.fillStyle = sub;
-    g.fillText(hm(day.open), padL, h - 6);
-    g.textAlign = "right"; g.fillText(hm(day.open + day.N), padL + W, h - 6); g.textAlign = "left";
-    labels = { x, y, count: points.length, slots: totalSlots };
+    return { s: i + 0.5, d, o: c.open, h: c.high, l: c.low, c: c.close, prev: c.prevClose };
+  });
+  // 5일 이동평균 (기간 앞쪽 날짜도 포함해서 계산)
+  items.forEach((k, i) => {
+    const j = skip + i;
+    if (j >= 4) { let sum = 0; for (let m = j - 4; m <= j; m++) sum += closeOf(allDates[m]); k.ma = sum / 5; }
+  });
+  return { line: false, items, S: items.length, minSpan: Math.min(items.length, 6), xLabel: (s) => { const k = items[Math.max(0, Math.min(items.length - 1, Math.floor(s)))]; return k ? k.d.slice(2).replace(/-/g, ".") : ""; } };
+}
+function drawChart(cv, tip, mode, code) {
+  const H = Number(cv.dataset.h) || 230;
+  const { g, w, h } = setupCanvas(cv, H);
+  const t = kst();
+  const padL = 6, padR = 62, padT = 16, padB = 24;
+  const W = w - padL - padR, HH = h - padT - padB;
+  const up = css("--up"), down = css("--down"), sub = css("--sub"), line = css("--line"), text = css("--text");
+  const data = chartData(mode, code, t);
+  // 보기 상태 (종목·기간이 바뀌면 처음부터)
+  let st = cv.__st;
+  if (!st || st.mode !== mode || st.code !== code || st.S !== data.S) {
+    st = cv.__st = { mode, code, S: data.S, a: 0, b: data.S, cross: null };
+  }
+  st.a = Math.max(0, Math.min(st.a, data.S - Math.min(st.b - st.a, data.S)));
+  st.b = Math.min(data.S, Math.max(st.b, st.a + data.minSpan));
+  st.data = data;
+  st.geom = { padL, W };
+  const zoomed = st.b - st.a < data.S - 0.001;
+  const x = (s) => padL + ((s - st.a) / (st.b - st.a)) * W;
+  const vis = data.items.filter((k) => k.s >= st.a - 1 && k.s <= st.b + 1);
+  g.clearRect(0, 0, w, h);
+  g.font = "11px -apple-system, sans-serif";
+  if (!data.items.length) {
+    g.fillStyle = sub; g.textAlign = "center";
+    g.fillText(data.line ? "오늘 장이 아직 열리지 않았어요" : "아직 기록이 없어요", padL + W / 2, padT + HH / 2);
+    g.textAlign = "left";
+    if (data.base) { g.fillText(fmt(data.base), padL + W + 6, padT + HH / 2 + 4); }
+    st.points = [];
+    bindChart(cv, tip, mode, code);
+    return;
+  }
+  let mn, mx;
+  if (data.line) {
+    const vals = vis.map((k) => k.v);
+    if (!zoomed) vals.push(data.base);
+    mn = Math.min(...vals); mx = Math.max(...vals);
   } else {
-    const back = addDays(t.date, mode === "1m" ? -31 : mode === "3m" ? -92 : -366);
-    const dates = sessionDates(t).filter((d) => d > back);
-    const candles = dates.map((d) => {
-      const c = buildDay(d).companies[code];
-      if (d === t.date) {
-        const q = quote(code, t);
-        return { d, o: q.open ?? q.price, h: q.high ?? q.price, l: q.low ?? q.price, c: q.price };
-      }
-      return { d, o: c.open, h: c.high, l: c.low, c: c.close };
-    });
-    points = candles.map((k) => ({ v: k.c, label: `${k.d.slice(5).replace("-", "/")} 종가 ${fmt(k.c)}`, k }));
-    mn = Math.min(...candles.map((k) => k.l)); mx = Math.max(...candles.map((k) => k.h));
-    const cw = W / Math.max(candles.length, 1);
-    const x = (i) => padL + cw * i + cw / 2;
-    const y = (v) => padT + (mx === mn ? HH / 2 : (1 - (v - mn) / (mx - mn)) * HH);
-    candles.forEach((k, i) => {
+    mn = Math.min(...vis.map((k) => k.l)); mx = Math.max(...vis.map((k) => k.h));
+  }
+  if (mx === mn) { mx += 1; mn -= 1; }
+  const padV = (mx - mn) * 0.06;
+  mx += padV; mn -= padV;
+  const y = (v) => padT + (1 - (v - mn) / (mx - mn)) * HH;
+  // 가로 눈금
+  g.strokeStyle = line; g.lineWidth = 1; g.fillStyle = sub;
+  for (let k = 0; k <= 3; k++) {
+    const v = mn + ((mx - mn) * k) / 3, yy = y(v);
+    g.beginPath(); g.moveTo(padL, yy); g.lineTo(padL + W, yy); g.stroke();
+    g.fillText(fmt(roundTick(v)), padL + W + 6, yy + 4);
+  }
+  g.save();
+  g.beginPath(); g.rect(padL, 0, W, h); g.clip();
+  let last;
+  if (data.line) {
+    const lastAll = data.items[data.items.length - 1].v;
+    const col = lastAll > data.base ? up : lastAll < data.base ? down : sub;
+    // 기준선 (어제 종가)
+    if (data.base >= mn && data.base <= mx) {
+      g.setLineDash([3, 4]); g.strokeStyle = sub;
+      g.beginPath(); g.moveTo(padL, y(data.base)); g.lineTo(padL + W, y(data.base)); g.stroke(); g.setLineDash([]);
+    }
+    const grad = g.createLinearGradient(0, padT, 0, padT + HH);
+    grad.addColorStop(0, col + "33"); grad.addColorStop(1, col + "00");
+    g.beginPath();
+    vis.forEach((k, i) => (i ? g.lineTo(x(k.s), y(k.v)) : g.moveTo(x(k.s), y(k.v))));
+    g.strokeStyle = col; g.lineWidth = zoomed ? 2.2 : 2; g.lineJoin = "round"; g.stroke();
+    g.lineTo(x(vis[vis.length - 1].s), padT + HH); g.lineTo(x(vis[0].s), padT + HH); g.closePath();
+    g.fillStyle = grad; g.fill();
+    last = data.items[data.items.length - 1];
+    if (last.s <= st.b && !st.cross) {
+      g.fillStyle = col + "40"; g.beginPath(); g.arc(x(last.s), y(last.v), 8, 0, Math.PI * 2); g.fill();
+      g.fillStyle = col; g.beginPath(); g.arc(x(last.s), y(last.v), 3.5, 0, Math.PI * 2); g.fill();
+    }
+  } else {
+    const cw = W / (st.b - st.a);
+    // 5일 이동평균선 (주황)
+    {
+      g.beginPath(); let started = false;
+      data.items.forEach((k) => {
+        if (k.ma == null || k.s < st.a - 1 || k.s > st.b + 1) return;
+        const yy = y(k.ma);
+        started ? g.lineTo(x(k.s), yy) : g.moveTo(x(k.s), yy); started = true;
+      });
+      g.strokeStyle = "#FF9F43"; g.lineWidth = 1.5; g.stroke();
+    }
+    for (const k of vis) {
       const col = k.c >= k.o ? up : down;
       g.strokeStyle = col; g.fillStyle = col; g.lineWidth = 1;
-      g.beginPath(); g.moveTo(x(i), y(k.h)); g.lineTo(x(i), y(k.l)); g.stroke();
-      const bw = Math.max(1.5, cw * 0.62);
+      g.beginPath(); g.moveTo(x(k.s), y(k.h)); g.lineTo(x(k.s), y(k.l)); g.stroke();
+      const bw = Math.max(1.5, Math.min(cw * 0.66, 26));
       const top = y(Math.max(k.o, k.c)), bot = y(Math.min(k.o, k.c));
-      g.fillRect(x(i) - bw / 2, top, bw, Math.max(1, bot - top));
-    });
-    g.fillStyle = sub;
-    g.fillText(fmt(mx), padL + W + 6, padT + 4);
-    g.fillText(fmt(mn), padL + W + 6, padT + HH);
-    if (candles.length) {
-      g.fillText(candles[0].d.slice(5).replace("-", "/"), padL, h - 6);
-      g.textAlign = "right"; g.fillText(candles[candles.length - 1].d.slice(5).replace("-", "/"), padL + W, h - 6); g.textAlign = "left";
+      g.fillRect(x(k.s) - bw / 2, top, bw, Math.max(1, bot - top));
     }
-    labels = { x, y, count: candles.length, slots: candles.length - 1, candle: true };
   }
-  // 손가락/마우스로 짚으면 가격 보기
-  cv.onpointermove = cv.onpointerdown = (e) => {
-    if (!points.length) return;
-    const rect = cv.getBoundingClientRect();
-    const px = e.clientX - rect.left;
-    let i;
-    if (labels.candle) i = Math.floor(((px - padL) / W) * labels.count);
-    else i = Math.round(((px - padL) / W) * labels.slots);
-    i = Math.max(0, Math.min(points.length - 1, i));
-    const p = points[i];
-    tip.textContent = labels.candle ? `${p.label} · 고 ${fmt(p.k.h)} 저 ${fmt(p.k.l)}` : `${p.label} · ${fmt(p.v)}원`;
+  // 짚은 곳 (십자선)
+  if (st.cross != null) {
+    let best = vis[0];
+    for (const k of vis) if (Math.abs(k.s - st.cross) < Math.abs(best.s - st.cross)) best = k;
+    const v = data.line ? best.v : best.c;
+    const xx = x(best.s), yy = y(v);
+    g.strokeStyle = text; g.globalAlpha = 0.55; g.setLineDash([4, 3]);
+    g.beginPath(); g.moveTo(xx, padT); g.lineTo(xx, padT + HH); g.moveTo(padL, yy); g.lineTo(padL + W, yy); g.stroke();
+    g.setLineDash([]); g.globalAlpha = 1;
+    const ref = data.line ? data.base : best.prev;
+    const col = v > ref ? up : v < ref ? down : sub;
+    g.fillStyle = css("--card"); g.beginPath(); g.arc(xx, yy, 6, 0, Math.PI * 2); g.fill();
+    g.fillStyle = col; g.beginPath(); g.arc(xx, yy, 4, 0, Math.PI * 2); g.fill();
+    g.restore();
+    // 오른쪽 가격표
+    g.fillStyle = col; rrect(g, padL + W + 2, yy - 10, padR - 4, 20, 6); g.fill();
+    g.fillStyle = "#fff"; g.font = "bold 11px -apple-system, sans-serif"; g.fillText(fmt(v), padL + W + 7, yy + 4);
+    const rate = (v - ref) / ref;
+    tip.textContent = data.line
+      ? `${best.label} · ${fmt(v)}원 (${pct(rate)})`
+      : `${best.d.slice(2).replace(/-/g, ".")} · 시 ${fmt(best.o)} 고 ${fmt(best.h)} 저 ${fmt(best.l)} 종 ${fmt(best.c)} (${pct(rate)})`;
     tip.classList.remove("hidden");
+  } else {
+    g.restore();
+    tip.classList.add("hidden");
+  }
+  // 아래 시간·날짜
+  g.font = "11px -apple-system, sans-serif"; g.fillStyle = sub;
+  g.textAlign = "left"; g.fillText(data.xLabel(st.a), padL, h - 7);
+  g.textAlign = "center"; g.fillText(data.xLabel((st.a + st.b) / 2), padL + W / 2, h - 7);
+  g.textAlign = "right"; g.fillText(data.xLabel(st.b), padL + W, h - 7);
+  g.textAlign = "left";
+  // 확대 중 표시 (아래쪽 막대)
+  if (zoomed) {
+    g.fillStyle = line; rrect(g, padL, h - 3, W, 3, 1.5); g.fill();
+    g.fillStyle = "#FF9F43"; rrect(g, padL + (st.a / data.S) * W, h - 3, Math.max(6, ((st.b - st.a) / data.S) * W), 3, 1.5); g.fill();
+  }
+  st.redraw = () => drawChart(cv, tip, mode, code);
+  bindChart(cv, tip, mode, code);
+}
+function rrect(g, x, y, w, h, r) {
+  g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+}
+function chartZoom(cv, factor, centerFrac = 0.5) {
+  const st = cv.__st;
+  if (!st || !st.data) return;
+  const S = st.data.S, span = st.b - st.a;
+  const ns = Math.max(st.data.minSpan, Math.min(S, span / factor));
+  const c = st.a + span * centerFrac;
+  st.a = Math.max(0, Math.min(S - ns, c - ns * centerFrac));
+  st.b = st.a + ns;
+  st.redraw && st.redraw();
+}
+function chartReset(cv) {
+  const st = cv.__st;
+  if (!st || !st.data) return;
+  st.a = 0; st.b = st.data.S; st.cross = null;
+  st.redraw && st.redraw();
+}
+function bindChart(cv) {
+  if (cv.__bound) return;
+  cv.__bound = true;
+  const ptr = new Map();
+  let gest = null, pressTimer = null, lastTap = 0;
+  const frac = (clientX) => {
+    const st = cv.__st, r = cv.getBoundingClientRect();
+    return Math.max(0, Math.min(1, (clientX - r.left - st.geom.padL) / st.geom.W));
   };
-  cv.onpointerleave = () => tip.classList.add("hidden");
+  const slotAt = (clientX) => { const st = cv.__st; return st.a + frac(clientX) * (st.b - st.a); };
+  const setCross = (clientX) => { const st = cv.__st; st.cross = slotAt(clientX); st.redraw(); };
+  const zoomed = () => { const st = cv.__st; return st.b - st.a < st.data.S - 0.001; };
+  cv.addEventListener("pointerdown", (e) => {
+    if (!cv.__st || !cv.__st.data) return;
+    ptr.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    try { cv.setPointerCapture(e.pointerId); } catch (er) { /* 괜찮음 */ }
+    clearTimeout(pressTimer);
+    if (ptr.size === 2) {
+      const [p1, p2] = [...ptr.values()];
+      const st = cv.__st;
+      gest = { mode: "pinch", d: Math.abs(p1.x - p2.x) || 1, a: st.a, b: st.b, c: frac((p1.x + p2.x) / 2) };
+      st.cross = null;
+      return;
+    }
+    const now = Date.now();
+    if (now - lastTap < 300) { chartReset(cv); gest = null; lastTap = 0; return; }
+    lastTap = now;
+    const st = cv.__st;
+    if (e.pointerType === "mouse") {
+      gest = { mode: zoomed() ? "pan" : "cross", sx: e.clientX, a: st.a, b: st.b, moved: false };
+      if (gest.mode === "cross") setCross(e.clientX);
+      return;
+    }
+    if (!zoomed()) { gest = { mode: "cross" }; setCross(e.clientX); return; }
+    gest = { mode: "wait", sx: e.clientX, sy: e.clientY, a: st.a, b: st.b };
+    pressTimer = setTimeout(() => { if (gest && gest.mode === "wait") { gest.mode = "cross"; setCross(gest.sx); if (navigator.vibrate) navigator.vibrate(8); } }, 280);
+  });
+  cv.addEventListener("pointermove", (e) => {
+    const st = cv.__st;
+    if (!st || !st.data) return;
+    if (!ptr.has(e.pointerId)) {
+      if (e.pointerType === "mouse" && st.points !== undefined && !gest) { setCross(e.clientX); }
+      else if (e.pointerType === "mouse" && !gest) setCross(e.clientX);
+      return;
+    }
+    ptr.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (!gest) return;
+    if (gest.mode === "pinch" && ptr.size >= 2) {
+      const [p1, p2] = [...ptr.values()];
+      const d = Math.abs(p1.x - p2.x) || 1;
+      const S = st.data.S, span0 = gest.b - gest.a;
+      const ns = Math.max(st.data.minSpan, Math.min(S, span0 * (gest.d / d)));
+      const c = gest.a + span0 * gest.c;
+      st.a = Math.max(0, Math.min(S - ns, c - ns * gest.c));
+      st.b = st.a + ns;
+      st.redraw();
+    } else if (gest.mode === "wait") {
+      if (Math.abs(e.clientX - gest.sx) > 6) { clearTimeout(pressTimer); gest.mode = "pan"; }
+      else if (Math.abs(e.clientY - gest.sy) > 10) { clearTimeout(pressTimer); gest = null; }
+    }
+    if (gest && gest.mode === "pan") {
+      const S = st.data.S, span = gest.b - gest.a;
+      const ds = ((e.clientX - gest.sx) / st.geom.W) * span;
+      st.a = Math.max(0, Math.min(S - span, gest.a - ds));
+      st.b = st.a + span;
+      st.cross = null;
+      st.redraw();
+    } else if (gest && gest.mode === "cross") setCross(e.clientX);
+  });
+  const end = (e) => {
+    ptr.delete(e.pointerId);
+    clearTimeout(pressTimer);
+    if (ptr.size === 0) {
+      const st = cv.__st;
+      if (gest && gest.mode === "cross" && e.pointerType !== "mouse" && st) { st.cross = null; st.redraw(); }
+      gest = null;
+    } else if (gest && gest.mode === "pinch") gest = null;
+  };
+  cv.addEventListener("pointerup", end);
+  cv.addEventListener("pointercancel", end);
+  cv.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse" && !ptr.size && cv.__st) { cv.__st.cross = null; cv.__st.redraw(); } });
+  cv.addEventListener("wheel", (e) => {
+    if (!cv.__st || !cv.__st.data || !(e.ctrlKey || Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.shiftKey)) return;
+    e.preventDefault();
+    if (e.ctrlKey) chartZoom(cv, e.deltaY < 0 ? 1.15 : 0.87, frac(e.clientX));
+    else { // 가로 스크롤 = 옆으로 이동
+      const st = cv.__st, span = st.b - st.a;
+      st.a = Math.max(0, Math.min(st.data.S - span, st.a + ((e.deltaX || e.deltaY) / st.geom.W) * span));
+      st.b = st.a + span; st.redraw();
+    }
+  }, { passive: false });
 }
 
 /* ---------- 상단 시계 · 시장 상태 ---------- */
@@ -1565,13 +1758,14 @@ function renderDetail(full) {
   wrap.append(cv, tip);
   body.append(wrap);
   const seg = el("div", "seg chart-range");
-  [["1d", "1일"], ["1m", "1개월"], ["3m", "3개월"], ["1y", "1년"]].forEach(([k, label]) => {
+  [["1d", "1일"], ["1w", "1주"], ["1m", "1개월"], ["3m", "3개월"], ["1y", "1년"], ["all", "전체"]].forEach(([k, label]) => {
     const b = el("button", chartMode === k ? "on" : "", label);
     b.type = "button";
     b.onclick = () => { chartMode = k; renderDetail(true); };
     seg.append(b);
   });
   body.append(seg);
+  body.append(chartTools(cv, () => openBigChart()));
   // 내 보유
   const mine = el("div", "card");
   mine.id = "d-mine";
@@ -1609,6 +1803,51 @@ function renderDetail(full) {
     body.append(memo);
   }
   requestAnimationFrame(() => drawChart(cv, tip, chartMode, detailCode));
+}
+function chartTools(cv, onBig) {
+  const row = el("div", "chart-tools");
+  row.append(el("span", "chart-hint", "두 손가락으로 확대 · 옆으로 끌기 · 꾹 누르면 가격"));
+  const b = (text, label, fn) => { const x = el("button", null, text); x.type = "button"; x.title = label; x.setAttribute("aria-label", label); x.onclick = fn; row.append(x); };
+  b("－", "축소", () => chartZoom(cv, 0.6));
+  b("＋", "확대", () => chartZoom(cv, 1.7, 1));
+  b("⟲", "처음 크기", () => chartReset(cv));
+  if (onBig) b("⤢", "크게 보기", onBig);
+  return row;
+}
+// 화면 가득 차트 (가로로 돌리면 더 넓게)
+function openBigChart() {
+  const c = byCode[detailCode];
+  const ov = el("div", "big-chart");
+  const head = el("div", "bc-head");
+  const title = el("div", "bc-title");
+  const close = el("button", "bc-close", "✕"); close.type = "button";
+  head.append(title, close);
+  const wrap = el("div", "chart-wrap");
+  const cv = el("canvas", "chart");
+  const tip = el("div", "chart-tip hidden");
+  wrap.append(cv, tip);
+  const seg = el("div", "seg");
+  let mode = chartMode;
+  const modes = [["1d", "1일"], ["1w", "1주"], ["1m", "1개월"], ["3m", "3개월"], ["1y", "1년"], ["all", "전체"]];
+  const draw = () => {
+    const q = quote(detailCode);
+    title.replaceChildren(el("b", null, c.name), el("span", "num " + cls(q.change), ` ${won(q.price)} ${pct(q.rate)}`));
+    cv.dataset.h = Math.max(220, window.innerHeight - 170);
+    cv.style.height = cv.dataset.h + "px";
+    drawChart(cv, tip, mode, detailCode);
+  };
+  modes.forEach(([k, label]) => {
+    const b = el("button", k === mode ? "on" : "", label); b.type = "button";
+    b.onclick = () => { mode = k; seg.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b)); draw(); };
+    seg.append(b);
+  });
+  ov.append(head, wrap, seg, chartTools(cv, null));
+  document.body.append(ov);
+  const timer = setInterval(() => { if (!cv.__st || cv.__st.cross == null) draw(); }, 2000);
+  const onResize = () => { if (cv.__st) cv.__st.cross = null; draw(); };
+  window.addEventListener("resize", onResize);
+  close.onclick = () => { clearInterval(timer); window.removeEventListener("resize", onResize); ov.remove(); };
+  requestAnimationFrame(draw);
 }
 function noteFor(q, st) {
   if (st.phase === "pre") return `동시호가 중이에요. 예상 시가 ${won(q.expected)} (${pct((q.expected - q.prevClose) / q.prevClose)}) · ${hm(openMin(st.date))}에 한꺼번에 체결돼요`;
